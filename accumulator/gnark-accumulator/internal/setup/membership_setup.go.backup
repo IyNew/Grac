@@ -1,0 +1,351 @@
+package setup
+
+import (
+	"crypto/rand"
+	"errors"
+	"fmt"
+	"math/big"
+	"time"
+
+	"github.com/consensys/gnark-crypto/ecc/bn254"
+	"github.com/consensys/gnark-crypto/ecc/bn254/fr"
+	"github.com/consensys/gnark-crypto/ecc/bn254/twistededwards"
+	"github.com/consensys/gnark-crypto/hash/mimc"
+	"github.com/consensys/gnark-crypto/kzg"
+	"github.com/consensys/gnark/backend/groth16"
+	"github.com/consensys/gnark/frontend"
+	"github.com/consensys/gnark/std/recursion/plonk"
+	"github.com/grac-enhanced/accumulator/gnark-accumulator/internal/circuit"
+	"github.com/grac-enhanced/accumulator/gnark-accumulator/pkg/types"
+)
+
+// MembershipSetup represents the complete setup for membership verification
+type MembershipSetup struct {
+	// Circuit keys
+	ProvingKey        *groth16.ProvingKey       `json:"proving_key"`
+	VerifyingKey      *groth16.VerifyingKey     `json:"verifying_key"`
+
+	// Cryptographic parameters
+	SecurityLevel     int                        `json:"security_level"`
+	HashToPrimeBits   int                        `json:"hash_to_prime_bits"`
+	FieldSizeBits     int                        `json:"field_size_bits"`
+
+	// Generators for integer commitments
+	IntegerCommitmentG *big.Int                 `json:"integer_commitment_g"`
+	IntegerCommitmentH *big.Int                 `json:"integer_commitment_h"`
+
+	// Generators for Pedersen commitments
+	PedersenCommitmentG *bn254.G1Affine      `json:"pedersen_commitment_g"`
+	PedersenCommitmentH *bn254.G1Affine      `json:"pedersen_commitment_h"`
+
+	// Generator for accumulator (RSA group generator)
+	AccumulatorG       *big.Int                 `json:"accumulator_g"`
+
+	// Setup metadata
+	CreatedAt         time.Time                  `json:"created_at"`
+	SetupTime         time.Duration              `json:"setup_time"`
+}
+
+// MembershipSetupOptions contains options for the membership setup process
+type MembershipSetupOptions struct {
+	SecurityLevel     int     `json:"security_level"`
+	HashToPrimeBits   int     `json:"hash_to_prime_bits"`
+	FieldSizeBits     int     `json:"field_size_bits"`
+	Backend           string  `json:"backend"`           // "groth16", "plonk"
+	Curve             string  `json:"curve"`             // "bn254"
+	Randomness        []byte  `json:"randomness,omitempty"`
+}
+
+// DefaultMembershipSetupOptions returns default membership setup options matching the Rust benchmark
+func DefaultMembershipSetupOptions() *MembershipSetupOptions {
+	return &MembershipSetupOptions{
+		SecurityLevel:   128,
+		HashToPrimeBits: 254, // From Rust benchmark
+		FieldSizeBits:   255, // BLS12-381 field size
+		Backend:         "groth16",
+		Curve:           "bn254",
+	}
+}
+
+// SetupMembership performs the complete setup for membership verification
+func SetupMembership(opts *MembershipSetupOptions) (*MembershipSetup, error) {
+	if opts == nil {
+		opts = DefaultMembershipSetupOptions()
+	}
+
+	startTime := time.Now()
+
+	// Validate options
+	if err := validateMembershipSetupOptions(opts); err != nil {
+		return nil, fmt.Errorf("invalid membership setup options: %w", err)
+	}
+
+	// Generate cryptographic generators
+	integerCommitmentG, integerCommitmentH, err := generateIntegerCommitmentGeneratorsForMembership(opts)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate integer commitment generators: %w", err)
+	}
+
+	pedersenCommitmentG, pedersenCommitmentH, err := generatePedersenCommitmentGeneratorsForMembership(opts)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate Pedersen commitment generators: %w", err)
+	}
+
+	// Generate accumulator generator (g in the RSA group)
+	accumulatorG, err := generateAccumulatorGenerator(opts)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate accumulator generator: %w", err)
+	}
+
+	// Create membership circuit
+	membershipCircuit := circuit.NewMembershipCircuit(
+		opts.HashToPrimeBits,
+		opts.FieldSizeBits,
+		integerCommitmentG,
+		integerCommitmentH,
+		pedersenCommitmentG,
+		pedersenCommitmentH,
+		accumulatorG,
+	)
+
+	// Setup proving and verification keys based on backend
+	var pk *groth16.ProvingKey
+	var vk *groth16.VerifyingKey
+	var err error
+
+	switch opts.Backend {
+	case "groth16":
+		pk, vk, err = groth16.Setup(membershipCircuit)
+		if err != nil {
+			return nil, fmt.Errorf("failed to setup Groth16 membership circuit: %w", err)
+		}
+	case "plonk":
+		// PLONK setup would use plonk.Setup instead
+		return nil, errors.New("PLONK backend not yet implemented for membership")
+	default:
+		return nil, fmt.Errorf("unsupported backend for membership: %s", opts.Backend)
+	}
+
+	setupTime := time.Since(startTime)
+
+	setup := &MembershipSetup{
+		ProvingKey:           pk,
+		VerifyingKey:         vk,
+		SecurityLevel:         opts.SecurityLevel,
+		HashToPrimeBits:      opts.HashToPrimeBits,
+		FieldSizeBits:        opts.FieldSizeBits,
+		IntegerCommitmentG:    integerCommitmentG,
+		IntegerCommitmentH:    integerCommitmentH,
+		PedersenCommitmentG:   pedersenCommitmentG,
+		PedersenCommitmentH:   pedersenCommitmentH,
+		AccumulatorG:          accumulatorG,
+		CreatedAt:            time.Now(),
+		SetupTime:            setupTime,
+	}
+
+	return setup, nil
+}
+
+// validateMembershipSetupOptions validates the membership setup options
+func validateMembershipSetupOptions(opts *MembershipSetupOptions) error {
+	if opts.SecurityLevel <= 0 || opts.SecurityLevel > 256 {
+		return errors.New("security level must be between 1 and 256")
+	}
+
+	if opts.HashToPrimeBits <= 0 || opts.HashToPrimeBits > 512 {
+		return errors.New("hash to prime bits must be between 1 and 512")
+	}
+
+	if opts.FieldSizeBits <= 0 || opts.FieldSizeBits > 512 {
+		return errors.New("field size bits must be between 1 and 512")
+	}
+
+	if opts.HashToPrimeBits >= opts.FieldSizeBits {
+		return errors.New("hash to prime bits must be less than field size bits")
+	}
+
+	if opts.Backend != "groth16" && opts.Backend != "plonk" {
+		return errors.New("backend must be 'groth16' or 'plonk'")
+	}
+
+	if opts.Curve != "bn254" {
+		return errors.New("curve must be 'bn254'")
+	}
+
+	return nil
+}
+
+// generateIntegerCommitmentGeneratorsForMembership generates secure generators for integer commitments
+func generateIntegerCommitmentGeneratorsForMembership(opts *MembershipSetupOptions) (*big.Int, *big.Int, error) {
+	// Generate two large prime generators for the integer commitment scheme
+	// These should be from RSA group in a full implementation
+
+	// For now, generate random 2048-bit numbers (simplified)
+	g := new(big.Int)
+	h := new(big.Int)
+
+	// In practice, these would be derived from RSA group parameters
+	// For this implementation, we'll use well-known generators
+
+	// g = 2 (simplified, should be generator of RSA group)
+	g.SetInt64(2)
+
+	// h = random 2048-bit number (co-prime to N)
+	hBytes := make([]byte, 256) // 2048 bits
+	if _, err := rand.Read(hBytes); err != nil {
+		return nil, nil, fmt.Errorf("failed to generate randomness for h: %w", err)
+	}
+	h.SetBytes(hBytes)
+
+	// Ensure h is odd and not a small power
+	if h.Bit(0) == 0 {
+		h.Add(h, big.NewInt(1))
+	}
+
+	return g, h, nil
+}
+
+// generatePedersenCommitmentGeneratorsForMembership generates secure generators for Pedersen commitments
+func generatePedersenCommitmentGeneratorsForMembership(opts *MembershipSetupOptions) (*bn254.G1Affine, *bn254.G1Affine, error) {
+	// Generate two random points on BLS12-381 G1 for Pedersen commitments
+	g := new(bn254.G1Affine)
+	h := new(bn254.G1Affine)
+
+	// Generate random scalars
+	scalarG := new(fr.Element)
+	scalarH := new(fr.Element)
+
+	if _, err := rand.Read(scalarG.Marshal()); err != nil {
+		return nil, nil, fmt.Errorf("failed to generate randomness for g: %w", err)
+	}
+	if _, err := rand.Read(scalarH.Marshal()); err != nil {
+		return nil, nil, fmt.Errorf("failed to generate randomness for h: %w", err)
+	}
+
+	// Use the standard generator and multiply by random scalars
+	g.ScalarMultiplicationBase(&scalarG)
+	h.ScalarMultiplicationBase(&scalarH)
+
+	// Ensure g and h are linearly independent
+	for g.Equal(h) {
+		// Regenerate h if it's equal to g
+		if _, err := rand.Read(scalarH.Marshal()); err != nil {
+			return nil, nil, fmt.Errorf("failed to regenerate randomness for h: %w", err)
+		}
+		h.ScalarMultiplicationBase(&scalarH)
+	}
+
+	return g, h, nil
+}
+
+// generateAccumulatorGenerator generates the accumulator generator (g)
+func generateAccumulatorGenerator(opts *MembershipSetupOptions) (*big.Int, error) {
+	// In a full RSA accumulator implementation, this would be the generator
+	// of the RSA group Z*_N where N = p*q with p, q large safe primes
+
+	// For this simplified implementation, we'll use a small generator
+	// In practice, this would be a carefully chosen generator of the RSA group
+	g := new(big.Int)
+	g.SetInt64(2) // g = 2 is a common generator choice
+
+	return g, nil
+}
+
+// ToMembershipSerializable converts membership setup to a serializable format
+func (s *MembershipSetup) ToMembershipSerializable() *types.MembershipSetupData {
+	return &types.MembershipSetupData{
+		SecurityLevel:     s.SecurityLevel,
+		HashToPrimeBits:   s.HashToPrimeBits,
+		FieldSizeBits:     s.FieldSizeBits,
+		IntegerCommitmentG: s.IntegerCommitmentG.String(),
+		IntegerCommitmentH: s.IntegerCommitmentH.String(),
+		PedersenCommitmentG: &types.EllipticPoint{
+			X: s.PedersenCommitmentG.X.String(),
+			Y: s.PedersenCommitmentG.Y.String(),
+		},
+		PedersenCommitmentH: &types.EllipticPoint{
+			X: s.PedersenCommitmentH.X.String(),
+			Y: s.PedersenCommitmentH.Y.String(),
+		},
+		AccumulatorG: s.AccumulatorG.String(),
+	}
+}
+
+// GetMembershipSetup returns the membership setup from file or creates a new one
+func GetMembershipSetup(opts *MembershipSetupOptions, filepath string) (*MembershipSetup, error) {
+	if filepath != "" {
+		// Try to load from file
+		// For now, just create new setup
+	}
+
+	// Create new setup
+	return SetupMembership(opts)
+}
+
+// ExportMembershipSetup exports the membership setup to a file
+func ExportMembershipSetup(setup *MembershipSetup, filepath string) error {
+	// For now, this is a placeholder
+	// In practice, this would serialize the keys and parameters
+	return nil
+}
+
+// ImportMembershipSetup imports the membership setup from a file
+func ImportMembershipSetup(filepath string) (*MembershipSetup, error) {
+	// For now, this is a placeholder
+	// In practice, this would deserialize the keys and parameters
+	return nil, errors.New("import membership setup not yet implemented")
+}
+
+// BenchmarkMembershipSetup benchmarks the membership setup process
+func BenchmarkMembershipSetup(opts *MembershipSetupOptions, iterations int) (*types.MembershipSetupBenchmarkResult, error) {
+	if iterations <= 0 {
+		iterations = 10
+	}
+
+	results := make([]time.Duration, iterations)
+	totalSetupTime := time.Duration(0)
+
+	for i := 0; i < iterations; i++ {
+		start := time.Now()
+		_, err := SetupMembership(opts)
+		if err != nil {
+			return nil, fmt.Errorf("membership setup iteration %d failed: %w", i, err)
+		}
+		duration := time.Since(start)
+		results[i] = duration
+		totalSetupTime += duration
+	}
+
+	// Calculate statistics
+	averageTime := totalSetupTime / time.Duration(iterations)
+	minTime := results[0]
+	maxTime := results[0]
+
+	for _, duration := range results[1:] {
+		if duration < minTime {
+			minTime = duration
+		}
+		if duration > maxTime {
+			maxTime = duration
+		}
+	}
+
+	return &types.MembershipSetupBenchmarkResult{
+		Iterations:       iterations,
+		AverageTimeMs:    float64(averageTime.Nanoseconds()) / 1_000_000.0,
+		MinTimeMs:        float64(minTime.Nanoseconds()) / 1_000_000.0,
+		MaxTimeMs:        float64(maxTime.Nanoseconds()) / 1_000_000.0,
+		TotalTimeMs:      float64(totalSetupTime.Nanoseconds()) / 1_000_000.0,
+		SuccessRate:      1.0, // All successful
+	}, nil
+}
+
+// MembershipSetupBenchmarkResult contains membership setup benchmark results
+type MembershipSetupBenchmarkResult struct {
+	Iterations    int     `json:"iterations"`
+	AverageTimeMs float64 `json:"average_time_ms"`
+	MinTimeMs    float64 `json:"min_time_ms"`
+	MaxTimeMs    float64 `json:"max_time_ms"`
+	TotalTimeMs  float64 `json:"total_time_ms"`
+	SuccessRate  float64 `json:"success_rate"`
+}

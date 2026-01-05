@@ -1,0 +1,6 @@
+$ mkdir -p "/Users/tangwenyi/Desktop/grac-enhanced/accumulator/cpsnarks-set-bridge/target/debug/build/az-2a83d619e8d3f5cc/out/try_track_caller"
+$ cd "/Users/tangwenyi/Desktop/grac-enhanced/accumulator/cpsnarks-set-bridge/target/debug/build/az-2a83d619e8d3f5cc/out/try_track_caller"
+$ printf '%s' "// try_tra"... > "/Users/tangwenyi/Desktop/grac-enhanced/accumulator/cpsnarks-set-bridge/target/debug/build/az-2a83d619e8d3f5cc/out/try_track_caller/try_track_caller.rs"
+$ cd "/Users/tangwenyi/Desktop/grac-enhanced/accumulator/cpsnarks-set-bridge/target/debug/build/az-2a83d619e8d3f5cc/out/try_track_caller" && "/Users/tangwenyi/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc" "try_track_caller.rs" "--emit=dep-info,metadata" >& /dev/null
+cargo:rustc-cfg=track_caller
+$ rm -r "/Users/tangwenyi/Desktop/grac-enhanced/accumulator/cpsnarks-set-bridge/target/debug/build/az-2a83d619e8d3f5cc/out/try_track_caller"

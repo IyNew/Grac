@@ -1,0 +1,217 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"log"
+	"os"
+	"time"
+
+	"github.com/grac-enhanced/accumulator/gnark-accumulator/internal/prove"
+	"github.com/grac-enhanced/accumulator/gnark-accumulator/internal/setup"
+	"github.com/grac-enhanced/accumulator/gnark-accumulator/internal/verify"
+	"github.com/grac-enhanced/accumulator/gnark-accumulator/pkg/types"
+)
+
+func main() {
+	fmt.Println("Membership Proof Benchmark")
+	fmt.Println("=========================")
+
+	// Setup configuration
+	opts := setup.DefaultMembershipSetupOptions()
+	opts.SecurityLevel = 128
+	opts.HashToPrimeBits = 254 // Match Rust benchmark
+	opts.FieldSizeBits = 255
+
+	// Run benchmarks with different parameters
+	runMembershipBenchmark(opts, 100)   // 100 iterations
+	runMembershipBenchmark(opts, 1000)  // 1000 iterations
+	runMembershipBenchmark(opts, 10000) // 10000 iterations
+
+	// Run setup benchmark
+	runSetupBenchmark(opts)
+
+	// Run full workflow benchmark
+	runFullWorkflowBenchmark(opts)
+}
+
+func runMembershipBenchmark(opts *setup.MembershipSetupOptions, iterations int) {
+	fmt.Printf("\n--- Membership Proof Benchmark (%d iterations) ---\n", iterations)
+
+	// Setup
+	membershipSetup, err := setup.SetupMembership(opts)
+	if err != nil {
+		log.Fatalf("Failed to setup membership circuit: %v", err)
+	}
+
+	// Create prover and verifier
+	prover := prove.NewMembershipProver(membershipSetup)
+	verifier := verify.NewMembershipVerifier(membershipSetup)
+
+	// Create test cases
+	testCases := prove.CreateMembershipTestProofData(10)
+
+	// Benchmark proof generation
+	fmt.Printf("Benchmarking membership proof generation...\n")
+	proveResults, err := prover.BenchmarkMembershipProofGeneration(testCases, iterations)
+	if err != nil {
+		log.Fatalf("Membership proof generation benchmark failed: %v", err)
+	}
+
+	// Benchmark proof verification
+	fmt.Printf("Benchmarking membership proof verification...\n")
+	verifyResults, err := verifier.BenchmarkMembershipProofVerification(testCases, iterations)
+	if err != nil {
+		log.Fatalf("Membership proof verification benchmark failed: %v", err)
+	}
+
+	// Print results
+	printMembershipBenchmarkResults(iterations, proveResults, verifyResults)
+}
+
+func runSetupBenchmark(opts *setup.MembershipSetupOptions) {
+	fmt.Printf("\n--- Membership Setup Benchmark ---\n")
+
+	// Benchmark setup
+	setupResults, err := setup.BenchmarkMembershipSetup(opts, 10)
+	if err != nil {
+		log.Fatalf("Membership setup benchmark failed: %v", err)
+	}
+
+	fmt.Printf("Setup Performance:\n")
+	fmt.Printf("  Iterations: %d\n", setupResults.Iterations)
+	fmt.Printf("  Average Time: %.2f ms\n", setupResults.AverageTimeMs)
+	fmt.Printf("  Min Time: %.2f ms\n", setupResults.MinTimeMs)
+	fmt.Printf("  Max Time: %.2f ms\n", setupResults.MaxTimeMs)
+	fmt.Printf("  Total Time: %.2f ms\n", setupResults.TotalTimeMs)
+	fmt.Printf("  Success Rate: %.2f%%\n", setupResults.SuccessRate*100)
+}
+
+func runFullWorkflowBenchmark(opts *setup.MembershipSetupOptions) {
+	fmt.Printf("\n--- Full Membership Workflow Benchmark ---\n")
+
+	iterations := 100
+	totalStartTime := time.Now()
+
+	// Setup
+	setupStart := time.Now()
+	membershipSetup, err := setup.SetupMembership(opts)
+	if err != nil {
+		log.Fatalf("Failed to setup membership circuit: %v", err)
+	}
+	setupTime := time.Since(setupStart)
+
+	// Create prover and verifier
+	prover := prove.NewMembershipProver(membershipSetup)
+	verifier := verify.NewMembershipVerifier(membershipSetup)
+
+	// Create test cases
+	testCases := prove.CreateMembershipTestProofData(10)
+
+	// Full workflow: generate proof and verify
+	successfulWorkflows := 0
+	var totalProveTime, totalVerifyTime time.Duration
+
+	fmt.Printf("Running %d full membership workflows...\n", iterations)
+
+	for i := 0; i < iterations; i++ {
+		testCase := testCases[i%len(testCases)]
+
+		// Generate proof
+		proveStart := time.Now()
+		proof, err := prover.ProveMembership(testCase.ProofData)
+		proveDuration := time.Since(proveStart)
+		totalProveTime += proveDuration
+
+		if err != nil {
+			fmt.Printf("Workflow %d: Proof generation failed: %v\n", i, err)
+			continue
+		}
+
+		// Verify proof
+		verifyStart := time.Now()
+		verified, err := verifier.VerifyMembership(proof, testCase.ProofData)
+		verifyDuration := time.Since(verifyStart)
+		totalVerifyTime += verifyDuration
+
+		if err != nil {
+			fmt.Printf("Workflow %d: Proof verification failed: %v\n", i, err)
+			continue
+		}
+
+		if !verified {
+			fmt.Printf("Workflow %d: Proof verification returned false\n", i)
+			continue
+		}
+
+		successfulWorkflows++
+
+		if i%20 == 0 {
+			fmt.Printf("Workflow %d: Prove %v, Verify %v\n", i, proveDuration, verifyDuration)
+		}
+	}
+
+	totalTime := time.Since(totalStartTime)
+	avgProveTime := totalProveTime / time.Duration(successfulWorkflows)
+	avgVerifyTime := totalVerifyTime / time.Duration(successfulWorkflows)
+
+	fmt.Printf("\nFull Membership Workflow Results:\n")
+	fmt.Printf("  Total Iterations: %d\n", iterations)
+	fmt.Printf("  Successful Workflows: %d\n", successfulWorkflows)
+	fmt.Printf("  Success Rate: %.2f%%\n", float64(successfulWorkflows)/float64(iterations)*100)
+	fmt.Printf("  Total Time: %.2f ms\n", float64(totalTime.Nanoseconds())/1_000_000.0)
+	fmt.Printf("  Setup Time: %.2f ms\n", float64(setupTime.Nanoseconds())/1_000_000.0)
+	fmt.Printf("  Average Prove Time: %.2f ms\n", float64(avgProveTime.Nanoseconds())/1_000_000.0)
+	fmt.Printf("  Average Verify Time: %.2f ms\n", float64(avgVerifyTime.Nanoseconds())/1_000_000.0)
+	fmt.Printf("  Prove Throughput: %.2f proofs/sec\n", 1000.0/float64(avgProveTime.Nanoseconds()/1_000_000.0))
+	fmt.Printf("  Verify Throughput: %.2f verifications/sec\n", 1000.0/float64(avgVerifyTime.Nanoseconds()/1_000_000.0))
+
+	// Calculate end-to-end throughput
+	avgWorkflowTime := (avgProveTime + avgVerifyTime)
+	fmt.Printf("  Workflow Throughput: %.2f workflows/sec\n", 1000.0/float64(avgWorkflowTime.Nanoseconds()/1_000_000.0))
+}
+
+func printMembershipBenchmarkResults(iterations int, proveResults *types.MembershipProofBenchmarkResult, verifyResults *types.MembershipVerificationBenchmarkResult) {
+	fmt.Printf("\nMembership Proof Generation Results:\n")
+	fmt.Printf("  Iterations: %d\n", proveResults.Iterations)
+	fmt.Printf("  Successful Proofs: %d\n", proveResults.SuccessfulProofs)
+	fmt.Printf("  Success Rate: %.2f%%\n", proveResults.SuccessRate*100)
+	fmt.Printf("  Average Time: %.2f ms\n", proveResults.AverageTimeMs)
+	fmt.Printf("  Min Time: %.2f ms\n", proveResults.MinTimeMs)
+	fmt.Printf("  Max Time: %.2f ms\n", proveResults.MaxTimeMs)
+	fmt.Printf("  Total Time: %.2f ms\n", proveResults.TotalTimeMs)
+	fmt.Printf("  Average Proof Size: %d bytes\n", proveResults.AverageProofSize)
+	fmt.Printf("  Prove Throughput: %.2f proofs/sec\n", 1000.0/proveResults.AverageTimeMs)
+
+	fmt.Printf("\nMembership Proof Verification Results:\n")
+	fmt.Printf("  Iterations: %d\n", verifyResults.Iterations)
+	fmt.Printf("  Successful Verifications: %d\n", verifyResults.SuccessfulVerifications)
+	fmt.Printf("  Success Rate: %.2f%%\n", verifyResults.SuccessRate*100)
+	fmt.Printf("  Average Time: %.2f ms\n", verifyResults.AverageTimeMs)
+	fmt.Printf("  Min Time: %.2f ms\n", verifyResults.MinTimeMs)
+	fmt.Printf("  Max Time: %.2f ms\n", verifyResults.MaxTimeMs)
+	fmt.Printf("  Total Time: %.2f ms\n", verifyResults.TotalTimeMs)
+	fmt.Printf("  Verify Throughput: %.2f verifications/sec\n", 1000.0/verifyResults.AverageTimeMs)
+
+	// Calculate efficiency metrics
+	proofToVerifyRatio := proveResults.AverageTimeMs / verifyResults.AverageTimeMs
+	fmt.Printf("\nEfficiency Metrics:\n")
+	fmt.Printf("  Proof/Verify Time Ratio: %.2fx\n", proofToVerifyRatio)
+	fmt.Printf("  Total Processing Time: %.2f ms\n", proveResults.AverageTimeMs+verifyResults.AverageTimeMs)
+}
+
+// saveResults saves benchmark results to a JSON file
+func saveResults(filename string, data interface{}) error {
+	jsonData, err := json.MarshalIndent(data, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal JSON: %w", err)
+	}
+
+	err = os.WriteFile(filename, jsonData, 0644)
+	if err != nil {
+		return fmt.Errorf("failed to write file: %w", err)
+	}
+
+	fmt.Printf("Results saved to %s\n", filename)
+	return nil
+}

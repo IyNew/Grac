@@ -1,0 +1,304 @@
+package verify
+
+import (
+	"encoding/json"
+	"fmt"
+	"math/big"
+	"time"
+
+	"github.com/consensys/gnark-crypto/ecc/bn254"
+	"github.com/consensys/gnark/backend/groth16"
+	"github.com/consensys/gnark/frontend"
+	"github.com/consensys/gnark/std/io/env"
+	"github.com/grac-enhanced/accumulator/gnark-accumulator/internal/circuit"
+	"github.com/grac-enhanced/accumulator/gnark-accumulator/internal/setup"
+	"github.com/grac-enhanced/accumulator/gnark-accumulator/pkg/types"
+)
+
+// MembershipVerifier handles the verification process for membership verification
+type MembershipVerifier struct {
+	setup *setup.MembershipSetup
+}
+
+// NewMembershipVerifier creates a new membership verifier with the given setup
+func NewMembershipVerifier(setup *setup.MembershipSetup) *MembershipVerifier {
+	return &MembershipVerifier{
+		setup: setup,
+	}
+}
+
+// VerifyMembership verifies a membership proof
+func (v *MembershipVerifier) VerifyMembership(
+	proof *groth16.Proof,
+	publicInputs *types.MembershipProofData,
+) (bool, error) {
+	startTime := time.Now()
+
+	// Convert public inputs to witness
+	witness, err := v.convertMembershipPublicInputsToWitness(publicInputs)
+	if err != nil {
+		return false, fmt.Errorf("failed to convert membership public inputs: %w", err)
+	}
+
+	// Verify proof
+	verified, err := groth16.Verify(proof, v.setup.VerifyingKey, witness)
+	if err != nil {
+		return false, fmt.Errorf("membership proof verification failed: %w", err)
+	}
+
+	verificationTime := time.Since(startTime)
+	fmt.Printf("Membership proof verification took: %v\n", verificationTime)
+
+	return verified, nil
+}
+
+// VerifyMembershipFromBridgeData verifies a membership proof from bridge API response
+func (v *MembershipVerifier) VerifyMembershipFromBridgeData(bridgeData *types.MembershipBridgeResponse) (bool, error) {
+	if bridgeData.Status != "success" {
+		return false, fmt.Errorf("bridge operation failed: %s", bridgeData.Error)
+	}
+
+	// For now, we'll assume bridge verification is correct
+	// In a full implementation, this would parse proof and verify with gnark
+	if bridgeData.VerificationResult != nil {
+		return *bridgeData.VerificationResult, nil
+	}
+
+	return false, fmt.Errorf("no verification result in membership bridge response")
+}
+
+// convertMembershipPublicInputsToWitness converts membership public inputs to gnark witness
+func (v *MembershipVerifier) convertMembershipPublicInputsToWitness(publicInputs *types.MembershipProofData) (frontend.Witness, error) {
+	// Parse big integers from strings
+	accumulatorValue, ok := new(big.Int).SetString(publicInputs.AccumulatorValue, 10)
+	if !ok {
+		return nil, fmt.Errorf("invalid accumulator value: %s", publicInputs.AccumulatorValue)
+	}
+
+	integerCommitment, ok := new(big.Int).SetString(publicInputs.IntegerCommitment, 10)
+	if !ok {
+		return nil, fmt.Errorf("invalid integer commitment: %s", publicInputs.IntegerCommitment)
+	}
+
+	rootAlpha1, ok := new(big.Int).SetString(publicInputs.RootProof.Alpha1, 10)
+	if !ok {
+		return nil, fmt.Errorf("invalid root alpha1: %s", publicInputs.RootProof.Alpha1)
+	}
+
+	// Parse elliptic curve points
+	pedersenCommitment, err := parseEllipticPoint(publicInputs.PedersenCommitment)
+	if err != nil {
+		return nil, fmt.Errorf("invalid pedersen commitment: %w", err)
+	}
+
+	modeqAlpha1, err := parseEllipticPoint(publicInputs.ModEqProof.Alpha1)
+	if err != nil {
+		return nil, fmt.Errorf("invalid modeq alpha1: %w", err)
+	}
+
+	modeqAlpha2, err := parseEllipticPoint(publicInputs.ModEqProof.Alpha2)
+	if err != nil {
+		return nil, fmt.Errorf("invalid modeq alpha2: %w", err)
+	}
+
+	// Parse hash-to-prime values
+	hashToPrimeChallenge, ok := new(big.Int).SetString(publicInputs.HashToPrimeProof.Challenge, 10)
+	if !ok {
+		return nil, fmt.Errorf("invalid hash_to_prime challenge: %s", publicInputs.HashToPrimeProof.Challenge)
+	}
+
+	originalElement, ok := new(big.Int).SetString(publicInputs.HashToPrimeProof.OriginalElement, 10)
+	if !ok {
+		return nil, fmt.Errorf("invalid original element: %s", publicInputs.HashToPrimeProof.OriginalElement)
+	}
+
+	hashedPrime, ok := new(big.Int).SetString(publicInputs.HashToPrimeProof.HashedPrime, 10)
+	if !ok {
+		return nil, fmt.Errorf("invalid hashed prime: %s", publicInputs.HashToPrimeProof.HashedPrime)
+	}
+
+	// Create witness with public inputs only
+	witness := frontend.NewWitness()
+
+	// Assign public inputs
+	witness["accumulator_value"] = accumulatorValue
+	witness["integer_commitment"] = integerCommitment
+	witness["pedersen_commitment_x"] = pedersenCommitment.X
+	witness["pedersen_commitment_y"] = pedersenCommitment.Y
+
+	// Membership-specific public inputs
+	witness["root_alpha1"] = rootAlpha1
+	witness["modeq_alpha1_x"] = modeqAlpha1.X
+	witness["modeq_alpha1_y"] = modeqAlpha1.Y
+	witness["modeq_alpha2_x"] = modeqAlpha2.X
+	witness["modeq_alpha2_y"] = modeqAlpha2.Y
+
+	witness["hash_to_prime_challenge"] = hashToPrimeChallenge
+	witness["original_element"] = originalElement
+	witness["hashed_prime"] = hashedPrime
+
+	return witness, nil
+}
+
+// BenchmarkMembershipProofVerification benchmarks membership proof verification performance
+func (v *MembershipVerifier) BenchmarkMembershipProofVerification(
+	testCases []types.MembershipTestCaseData,
+	iterations int,
+) (*types.MembershipVerificationBenchmarkResult, error) {
+	if len(testCases) == 0 {
+		return nil, fmt.Errorf("no test cases provided")
+	}
+
+	successCount := 0
+	totalTime := time.Duration(0)
+	minTime := time.Duration(1<<63 - 1) // Max time.Duration
+	maxTime := time.Duration(0)
+
+	for i := 0; i < iterations; i++ {
+		testCase := testCases[i%len(testCases)]
+		start := time.Now()
+
+		// For benchmarking, we need to create a proof first
+		// In practice, proofs would come from prover
+		proof, err := v.createMembershipMockProof(testCase)
+		if err != nil {
+			fmt.Printf("Failed to create membership mock proof for iteration %d: %v\n", i, err)
+			continue
+		}
+
+		verified, err := v.VerifyMembership(proof, testCase.ProofData)
+		duration := time.Since(start)
+
+		if err != nil {
+			fmt.Printf("Membership proof verification failed for iteration %d: %v\n", i, err)
+			continue
+		}
+
+		if !verified {
+			fmt.Printf("Membership proof verification returned false for iteration %d\n", i)
+			continue
+		}
+
+		successCount++
+		totalTime += duration
+
+		if duration < minTime {
+			minTime = duration
+		}
+		if duration > maxTime {
+			maxTime = duration
+		}
+
+		fmt.Printf("Membership iteration %d: %v, verified: %t\n", i, duration, verified)
+	}
+
+	if successCount == 0 {
+		return nil, fmt.Errorf("all membership proof verification attempts failed")
+	}
+
+	averageTime := totalTime / time.Duration(successCount)
+
+	return &types.MembershipVerificationBenchmarkResult{
+		Iterations:                iterations,
+		SuccessfulVerifications:   successCount,
+		SuccessRate:               float64(successCount) / float64(iterations),
+		AverageTimeMs:             float64(averageTime.Nanoseconds()) / 1_000_000.0,
+		MinTimeMs:                 float64(minTime.Nanoseconds()) / 1_000_000.0,
+		MaxTimeMs:                 float64(maxTime.Nanoseconds()) / 1_000_000.0,
+		TotalTimeMs:               float64(totalTime.Nanoseconds()) / 1_000_000.0,
+	}, nil
+}
+
+// createMembershipMockProof creates a mock membership proof for benchmarking
+func (v *MembershipVerifier) createMembershipMockProof(testCase types.MembershipTestCaseData) (*groth16.Proof, error) {
+	// In a real implementation, this would use actual proof data
+	// For benchmarking purposes, we'll create a valid-looking mock proof
+
+	proof := new(groth16.Proof)
+
+	// Generate random valid-looking proof points
+	// This is a simplified approach - real proofs would have specific structure
+	if err := proof.A.SetRandom(); err != nil {
+		return nil, fmt.Errorf("failed to generate membership proof A: %w", err)
+	}
+
+	if err := proof.B.SetRandom(); err != nil {
+		return nil, fmt.Errorf("failed to generate membership proof B: %w", err)
+	}
+
+	if err := proof.C.SetRandom(); err != nil {
+		return nil, fmt.Errorf("failed to generate membership proof C: %w", err)
+	}
+
+	return proof, nil
+}
+
+// BatchMembershipVerification allows verification of multiple membership proofs in batch
+func (v *MembershipVerifier) BatchMembershipVerification(
+	proofs []*groth16.Proof,
+	publicInputs []*types.MembershipProofData,
+) ([]bool, error) {
+	if len(proofs) != len(publicInputs) {
+		return nil, fmt.Errorf("number of membership proofs must match number of public inputs")
+	}
+
+	results := make([]bool, len(proofs))
+
+	for i, proof := range proofs {
+		verified, err := v.VerifyMembership(proof, publicInputs[i])
+		if err != nil {
+			results[i] = false
+			fmt.Printf("Batch membership verification failed for proof %d: %v\n", i, err)
+		} else {
+			results[i] = verified
+		}
+	}
+
+	return results, nil
+}
+
+// AggregateMembershipVerificationStats aggregates membership verification statistics
+func (v *MembershipVerifier) AggregateMembershipVerificationStats(results []bool) types.MembershipAggregatedStats {
+	total := len(results)
+	successes := 0
+
+	for _, result := range results {
+		if result {
+			successes++
+		}
+	}
+
+	return types.MembershipAggregatedStats{
+		TotalMembershipProofs:     total,
+		SuccessfulMembershipProofs: successes,
+		FailedMembershipProofs:     total - successes,
+		MembershipSuccessRate:      float64(successes) / float64(total),
+	}
+}
+
+// GetMembershipVerificationMetrics returns metrics about membership verification setup
+func (v *MembershipVerifier) GetMembershipVerificationMetrics() types.MembershipVerificationMetrics {
+	return types.MembershipVerificationMetrics{
+		SecurityLevel:              v.setup.SecurityLevel,
+		HashToPrimeBits:            v.setup.HashToPrimeBits,
+		FieldSizeBits:              v.setup.FieldSizeBits,
+		CurveName:                 "bn254",
+		Backend:                   "groth16",
+		MembershipVerificationKeySize: estimateMembershipVerificationKeySize(v.setup.VerifyingKey),
+		SetupTime:                 v.setup.SetupTime,
+		CreatedAt:                 v.setup.CreatedAt,
+		AccumulatorG:              v.setup.AccumulatorG.String(),
+	}
+}
+
+// estimateMembershipVerificationKeySize estimates size of membership verification key in bytes
+func estimateMembershipVerificationKeySize(vk *groth16.VerifyingKey) int {
+	if vk == nil {
+		return 0
+	}
+
+	// Rough estimate for Groth16 verification key on BN254
+	// This includes G1 points and G2 points
+	// Membership verification key might be similar size to non-membership
+	return 48*2 + 96*2 // ~288 bytes for alpha, beta, gamma, delta
+}

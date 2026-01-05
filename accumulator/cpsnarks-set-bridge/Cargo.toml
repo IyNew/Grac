@@ -1,0 +1,22 @@
+[package]
+name = "cpsnarks-set-bridge"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.0", features = ["full"] }
+cpsnarks-set = { path = "../cpsnarks-set" }
+accumulator = { git = "https://github.com/kobigurk/cpsnarks-set-accumulator" }
+rug = "1.19"
+rand = "0.8"
+merlin = "3.0"
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+[features]
+default = ["arkworks"]
+arkworks = ["cpsnarks-set/arkworks"]
+dalek = ["cpsnarks-set/dalek"]
